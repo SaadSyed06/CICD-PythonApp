@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gab-app-deployment
+  labels:
+    app: gab-app
+    environment: "dev"  # Default value, can be set in the pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gab-app
+  template:
+    metadata:
+      labels:
+        app: gab-app
+        environment: "dev"  # Default value, can be set in the pipeline
+    spec:
+      containers:
+        - name: gab-app-container
+          image: ""  # Placeholder for image
+          ports:
+            - containerPort: 80
+          env:
+            - name: ENVIRONMENT
+              value: "dev"  # Can be set from the pipeline
+      imagePullSecrets:
+        - name: gab-app-secret

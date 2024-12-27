@@ -1,0 +1,188 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          venv/bin/pip install -r requirements.txt
+          venv/bin/pip install pytest flake8 bandit safety
+          pip install --upgrade jinja2
+
+      - name: Run Unit Tests
+        run: |
+          venv/bin/python -m pytest
+
+      - name: Lint Test with Flake8
+        run: |
+          venv/bin/python -m flake8 . --exclude=venv
+
+     # Security Check - Static Code Analysis  
+      - name: Run Bandit Security Check
+        run: |
+          source venv/bin/activate
+          bandit -r . --exclude venv || true
+      
+      # Security Check - Dependency Vulnerability Scanning (ignore jinja vuln)
+      - name: Run Safety Check for Vulnerabilities
+        run: |
+          source venv/bin/activate
+          safety check --ignore=70612 
+
+  build_and_push_docker_image:
+    needs: build_and_test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Set environment variables based on branch
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY_PROD }}" >> $GITHUB_ENV
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          else
+            echo "ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY_DEV }}" >> $GITHUB_ENV
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          fi
+
+      - name: Set IMAGE_TAG to latest
+        run: echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+
+      - name: Build and tag Docker image
+        run: |
+          docker build -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest .
+    
+      # Security Check - Container Vulnerability Scan
+      - name: Run Trivy Image Scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+          image --severity HIGH,CRITICAL ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
+
+  deploy_k8s:
+    needs: build_and_push_docker_image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get Last Commit SHA
+        id: get_last_commit
+        run: echo "LAST_COMMIT_SHA=${{ github.sha }}" >> $GITHUB_ENV
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+      - name: Check kubectl version
+        run: kubectl version --client
+
+      - name: Update Kubeconfig for EKS Cluster
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            CLUSTER_NAME=eks-cluster-prod
+          else
+            CLUSTER_NAME=eks-cluster-dev
+          fi
+          aws eks update-kubeconfig --name $CLUSTER_NAME --region ${{ secrets.AWS_REGION }}
+
+      - name: Make update-k8s-yaml.sh executable
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ECR_REGION: ${{ secrets.AWS_REGION }}
+        run: chmod +x ./kubernetes/update-k8s-yaml.sh
+
+      - name: Update Kubernetes Deployment YAML
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ECR_REGION: ${{ secrets.AWS_REGION }}
+        run: ./kubernetes/update-k8s-yaml.sh 
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f ./kubernetes/deployment.yaml
+
+      - name: Create ImagePullSecret
+        run: |
+          kubectl get secret gab-app-secret || \
+          kubectl create secret docker-registry gab-app-secret \
+           --docker-server=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com \
+           --docker-username=AWS \
+           --docker-password=$(aws ecr get-login-password --region ${{ secrets.AWS_REGION }}) \
+           --docker-email=${{ secrets.MY_AWS_EMAIL }}
+
+      - name: Deploy to Service Kubernetes
+        run: |
+          kubectl apply -f ./kubernetes/service.yaml
+
+      - name: Get Kubernetes Pods
+        run: |
+          echo "Getting Kubernetes pods..."
+          kubectl get pods -o wide
+
+      - name: Get Kubernetes Service
+        run: |
+          echo "Getting Kubernetes service..."
+          kubectl get svc
+
+      - name: Describe Kubernetes Pods
+        run: |
+          echo "Describing Kubernetes pods..."
+          kubectl describe pods
+
+      - name: Get Kubernetes Nodes
+        run: |
+          echo "Getting Kubernetes nodes..."
+          kubectl get nodes -o wide

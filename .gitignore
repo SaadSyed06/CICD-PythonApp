@@ -1,0 +1,33 @@
+# Ignore Terraform state and provider files
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.d
+terraform.tfstate.backup
+terraform/.terraform/providers/**
+terraform/terraform-provider-aws_v5.72.1_x5.exe
+terraform/terraform-provider-aws*.exe
+terraform/terraform-provider-*.exe
+# Ignore Terraform provider binaries
+terraform/.terraform/providers/terraform-provider-aws_*.exe
+#git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch terraform/terraform-provider-aws_v5.72.1_x5.exe' --prune-empty --tag-name-filter cat -- --all
+
+# Ignore Ansible virtual environment folder
+ansible-venv/
+
+# Ignore Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.whl
+Pipfile.lock
+pyvenv.cfg
+
+# Ignore other IDE or OS-specific files
+.vscode/
+.DS_Store
+
+# Ignore any logs or temporary files
+*.log
+*.tmp
